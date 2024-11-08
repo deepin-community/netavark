@@ -1,4 +1,15 @@
 #!/usr/bin/make -f
 
+# generate cargo-checksum file
+_mkchecksum = printf '{"package":"%s","files":{}}\n' \
+ $$(sha256sum $(or $2,$(dir $1)Cargo.toml) | grep -Po '^\S+') > $1;
+
 %:
-	dh $@
+	dh $@ --buildsystem cargo
+
+execute_before_dh_auto_configure:
+	$(call _mkchecksum,debian/cargo-checksum.json,Cargo.toml)
+
+execute_after_dh_install:
+	mkdir -vp debian/netavark/usr/lib
+	mv -v debian/netavark/usr/bin debian/netavark/usr/lib/podman
