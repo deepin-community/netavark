@@ -1,3 +1,9 @@
+netavark (1.12.1-6deepin1) unstable; urgency=medium
+
+  * Also move netavark-dhcp-proxy.socket to /usr/lib/systemd.
+
+ -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 20 Nov 2024 16:37:28 +0800
+
 netavark (1.12.1-6) unstable; urgency=medium
 
   * Move systemd units to /usr/lib/systemd, Closes: #1087846
