@@ -4,6 +4,7 @@ Priority: optional
 Maintainer: Reinhard Tartler <siretart@tauware.de>
 Build-Depends: cargo:native <!nocheck>,
                debhelper-compat (= 13),
+               lsb-release,
                dh-cargo (>= 25),
                librust-anyhow-dev,
                librust-atty-dev,
