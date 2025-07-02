@@ -1,3 +1,9 @@
+netavark (1.12.1-6deepin2) unstable; urgency=medium
+
+  * Also move netavark-firewalld-reload.service to systemd
+
+ -- heysion <yuanhaisheng@uniontech.com>  Wed, 02 Jul 2025 09:57:13 +0800
+
 netavark (1.12.1-6deepin1) unstable; urgency=medium
 
   * Also move netavark-dhcp-proxy.socket to /usr/lib/systemd.
