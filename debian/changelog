@@ -1,3 +1,9 @@
+netavark (1.12.1-6deepin3) unstable; urgency=medium
+
+  * fix ifeq compare release with uos
+
+ -- heysion <heysion@deepin.com>  Tue, 08 Jul 2025 16:11:39 +0800
+
 netavark (1.12.1-6deepin2) unstable; urgency=medium
 
   * Also move netavark-firewalld-reload.service to systemd
