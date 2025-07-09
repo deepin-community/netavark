@@ -1,3 +1,9 @@
+netavark (1.12.1-6deepin4) unstable; urgency=medium
+
+  * remove duplicate systemd service
+
+ -- heysion <heysion@deepin.com>  Wed, 09 Jul 2025 10:25:58 +0800
+
 netavark (1.12.1-6deepin3) unstable; urgency=medium
 
   * fix ifeq compare release with uos

@@ -24,7 +24,6 @@ execute_after_dh_install:
 
 override_dh_installsystemd:
 ifneq (,$(filter uos Uos UOS, $(shell lsb_release -i -s)))
-	dh_installsystemd
 	dh_installsystemd -pnetavark --no-enable netavark-dhcp-proxy.service
 	dh_installsystemd -pnetavark --no-enable netavark-firewalld-reload.service
 else
