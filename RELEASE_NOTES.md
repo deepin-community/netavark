@@ -1,5 +1,63 @@
 # Release Notes
 
+## v1.16.1
+
+* Fixed an incompatibility with nftables 1.1.4 json output which broke the firewall rule generation. ([#1303](https://github.com/containers/netavark/issues/1303))
+
+## v1.16.0
+
+* The netavark bridge driver now defaults to using the MTU of the default route interface when no explicit MTU was configured for the network. This helps in environments where a non standard MTU is used. ([containers/podman#20009](https://github.com/containers/podman/issues/20009))
+* Netavark now creates sysctl config files under /run/sysctl.d (only when running as root and with systemd as init system) for the sysctl values we configure for our bridge/veth interface. This ensures that running `sysctl --system` or systemd-sysctl won't revert them back to its original value.
+* The MSRV has been bumped to v1.83.
+* Dependency updates.
+
+## v1.15.2
+
+* Fixed a bug that caused a thread leak in the dhcp-proxy for each started container. ([#811](https://github.com/containers/netavark/issues/811))
+* Fixed a bug which printed bogus errors when the dhcp-proxy was run with an activity timeout of 0. ([#1262](https://github.com/containers/netavark/issues/1262))
+
+## v1.15.1
+
+* Fixed a regression that caused container name lookups to get the wrong ip address when the host's search domain responded for the same name. ([containers/podman#26198](https://github.com/containers/podman/issues/26198))
+
+## v1.15.0
+
+* Fixed an issue where invalid dns names that included a space would cause aardvark-dns to crash. Instead such names are now ignored and generate a warning. ([#1019](https://github.com/containers/netavark/issues/1019))
+* Netavark teardown now ignores SIGTERM and SIGINT signals to prevent interfaces/firewall rules from leaking during teardown. ([#1223](https://github.com/containers/netavark/issues/1223))
+* Netavark no longer set the dns.podman search domain in the response. Aardvark-dns sill uses that name and resolves it but it will no longer be added to the containers resolv.conf because of that. ([#1133](https://github.com/containers/netavark/issues/1133))
+* The MSRV has been bumped to v1.77.
+* Dependency updates.
+
+## v1.14.1
+
+* Fixed an issue where the Makefile did not install the `netavark-firewalld(7)` man page. ([#1179](https://github.com/containers/netavark/issues/1179))
+* Fixed the detection of Firewalld's StrictForwardPorts property.
+* Upstream tests no longer check for the commit sha in the version output by default so downstream tests on packaged versions without the commit info can pass.
+
+## v1.14.0
+
+* bridge: Add support for a new option called `mode`. When set to `unmanaged` only the veth pair and ip addresses are setup. The bridge must exist and no firewall or sysctl setting will be configured in this mode. ([#1090](https://github.com/containers/netavark/issues/1090))
+* bridge: Add support for DHCP when using unmanaged mode. ([#868](https://github.com/containers/netavark/issues/868))
+* bridge: Add support for the `vlan` option. ([#1028](https://github.com/containers/netavark/issues/1028))
+* When using DHCP netavark will now send the container hostname in the DHCP request and use the container id as client id. ([#676](https://github.com/containers/netavark/issues/676))
+* The firewalld driver was improved and major outstanding bugs were addressed but is still considered experimental. A new man page `netavark-firewalld(7)` has been added to document some of the firewalld interactions.
+* Dependency updates.
+
+## v1.13.1
+
+* Fixed a bug where port forwarding rules might not be removed correctly on nftables when different host ips are used for the same port. ([#1129](https://github.com/containers/netavark/issues/1129))
+* On aardvark-dns setup errors properly cleanup interfaces and firewall rules again. ([#1121](https://github.com/containers/netavark/issues/1121))
+
+## v1.13.0
+
+* Fixed bug where port forwarding rules might not be removed correctly on nftables
+* Add DNS DNAT rules first with nftables
+
+## v1.12.2
+
+* Ensure DNS rules cover TCP for iptables and nftables
+* On ardvark-dns start, delete entries again on failure
+
 ## v1.12.1
 
 * Fixed problem with categories in Cargo.toml that prevented us from publishing v1.12.0

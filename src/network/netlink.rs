@@ -15,7 +15,10 @@ use netlink_packet_core::{
 };
 use netlink_packet_route::{
     address::AddressMessage,
-    link::{InfoData, InfoKind, LinkAttribute, LinkFlags, LinkInfo, LinkMessage},
+    link::{
+        AfSpecBridge, BridgeVlanInfo, BridgeVlanInfoFlags, InfoBridge, InfoData, InfoKind,
+        LinkAttribute, LinkFlags, LinkInfo, LinkMessage,
+    },
     route::{RouteAddress, RouteMessage, RouteProtocol, RouteScope, RouteType},
     AddressFamily, RouteNetlinkMessage,
 };
@@ -186,6 +189,48 @@ impl Socket {
         Ok(())
     }
 
+    /// set the vlan_filtering attribute on a bridge
+    pub fn set_vlan_filtering(&mut self, link_id: u32, vlan_filtering: bool) -> NetavarkResult<()> {
+        let mut msg = LinkMessage::default();
+        msg.header.index = link_id;
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::Kind(InfoKind::Bridge),
+            LinkInfo::Data(InfoData::Bridge(vec![InfoBridge::VlanFiltering(
+                vlan_filtering,
+            )])),
+        ]));
+
+        // Now idea why this must use NewLink not SetLink, I strace'd ip route
+        // and they use newlink and which setlink here it does not error but also does not set the setting.
+        let result = self.make_netlink_request(RouteNetlinkMessage::NewLink(msg), NLM_F_ACK)?;
+        expect_netlink_result!(result, 0);
+        Ok(())
+    }
+
+    /// set the vlan id for an interface which is attached to the bridge with vlan_filtering
+    /// Performs the equivalent of "bridge vlan add dev test vid <num> [flags]"
+    pub fn set_vlan_id(
+        &mut self,
+        link_id: u32,
+        // vlan id
+        vid: u16,
+        // flags for the vlan config
+        flags: BridgeVlanInfoFlags,
+    ) -> NetavarkResult<()> {
+        let mut msg = LinkMessage::default();
+        msg.header.interface_family = AddressFamily::Bridge;
+        // msg.header.link_layer_type = LinkLayerType::Netrom;
+        msg.header.index = link_id;
+        msg.attributes
+            .push(LinkAttribute::AfSpecBridge(vec![AfSpecBridge::VlanInfo(
+                BridgeVlanInfo { flags, vid },
+            )]));
+
+        let result = self.make_netlink_request(RouteNetlinkMessage::SetLink(msg), NLM_F_ACK)?;
+        expect_netlink_result!(result, 0);
+        Ok(())
+    }
+
     fn create_addr_msg(link_id: u32, addr: &ipnet::IpNet) -> AddressMessage {
         let mut msg = AddressMessage::default();
         msg.header.index = link_id;
@@ -292,7 +337,7 @@ impl Socket {
 
     pub fn add_route(&mut self, route: &Route) -> NetavarkResult<()> {
         let msg = Self::create_route_msg(route);
-        info!("Adding route {}", route);
+        info!("Adding route {route}");
 
         let result = self
             .make_netlink_request(RouteNetlinkMessage::NewRoute(msg), NLM_F_ACK | NLM_F_CREATE)?;
@@ -303,7 +348,7 @@ impl Socket {
 
     pub fn del_route(&mut self, route: &Route) -> NetavarkResult<()> {
         let msg = Self::create_route_msg(route);
-        info!("Deleting route {}", route);
+        info!("Deleting route {route}");
 
         let result = self.make_netlink_request(RouteNetlinkMessage::DelRoute(msg), NLM_F_ACK)?;
         expect_netlink_result!(result, 0);
@@ -441,7 +486,7 @@ impl Socket {
         packet.finalize();
 
         packet.serialize(&mut self.buffer[..]);
-        trace!("send netlink packet: {:?}", packet);
+        trace!("send netlink packet: {packet:?}");
 
         self.socket.send(&self.buffer[..packet.buffer_len()], 0)?;
         Ok(())
@@ -466,7 +511,7 @@ impl Socket {
                             "failed to deserialize netlink message: {e}",
                         ))
                     })?;
-                trace!("read netlink packet: {:?}", rx_packet);
+                trace!("read netlink packet: {rx_packet:?}");
 
                 if rx_packet.header.sequence_number != self.sequence_number {
                     return Err(NetavarkError::msg(format!(

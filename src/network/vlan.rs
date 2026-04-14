@@ -3,16 +3,18 @@ use std::os::fd::BorrowedFd;
 use std::{collections::HashMap, net::IpAddr};
 
 use netlink_packet_route::link::{
-    InfoData, InfoIpVlan, InfoKind, InfoMacVlan, IpVlanMode, LinkAttribute, MacVlanMode,
+    InfoData, InfoIpVlan, InfoKind, InfoMacVlan, IpVlanMode, MacVlanMode,
 };
-use rand::distributions::{Alphanumeric, DistString};
+use rand::distr::{Alphanumeric, SampleString};
 
-use crate::network::macvlan_dhcp::{get_dhcp_lease, release_dhcp_lease};
+use crate::network::core_utils::get_default_route_interface;
+use crate::network::dhcp::{dhcp_teardown, get_dhcp_lease};
 use crate::{
     dns::aardvark::AardvarkEntry,
     error::{ErrorWrap, NetavarkError, NetavarkResult},
     exec_netns,
-    network::core_utils::{disable_ipv6_autoconf, join_netns},
+    network::core_utils::join_netns,
+    network::sysctl::disable_ipv6_autoconf,
 };
 
 use super::{
@@ -20,7 +22,7 @@ use super::{
         NO_CONTAINER_INTERFACE_ERROR, OPTION_BCLIM, OPTION_METRIC, OPTION_MODE, OPTION_MTU,
         OPTION_NO_DEFAULT_ROUTE,
     },
-    core_utils::{self, get_ipam_addresses, parse_option, CoreUtils},
+    core_utils::{self, get_ipam_addresses, get_mac_address, parse_option, CoreUtils},
     driver::{self, DriverInfo},
     internal_types::IPAMAddresses,
     netlink::{self, CreateLinkOptions},
@@ -144,7 +146,7 @@ impl driver::NetworkDriver for Vlan<'_> {
     fn setup(
         &self,
         netlink_sockets: (&mut netlink::Socket, &mut netlink::Socket),
-    ) -> Result<(StatusBlock, Option<AardvarkEntry>), NetavarkError> {
+    ) -> Result<(StatusBlock, Option<AardvarkEntry<'_>>), NetavarkError> {
         let data = match &self.data {
             Some(d) => d,
             None => return Err(NetavarkError::msg("must call validate() before setup()")),
@@ -188,6 +190,8 @@ impl driver::NetworkDriver for Vlan<'_> {
                 &data.container_interface_name,
                 self.info.netns_path,
                 &container_vlan_mac,
+                self.info.container_hostname.as_deref().unwrap_or(""),
+                self.info.container_id,
             )?;
             // do not overwrite dns servers set by dns podman flag
             if !self.info.container_dns_servers.is_some() {
@@ -216,33 +220,7 @@ impl driver::NetworkDriver for Vlan<'_> {
         &self,
         netlink_sockets: (&mut netlink::Socket, &mut netlink::Socket),
     ) -> NetavarkResult<()> {
-        let ipam = get_ipam_addresses(self.info.per_network_opts, self.info.network)?;
-        let if_name = self.info.per_network_opts.interface_name.clone();
-
-        // If we are using DHCP macvlan, we need to at least call to the proxy so that
-        // the proxy's cache can get updated and the current lease can be released.
-        if ipam.dhcp_enabled {
-            let dev = netlink_sockets
-                .1
-                .get_link(netlink::LinkID::Name(if_name))
-                .wrap(format!(
-                    "get macvlan interface {}",
-                    &self.info.per_network_opts.interface_name
-                ))?;
-
-            let container_mac_address = get_mac_address(dev.attributes)?;
-            release_dhcp_lease(
-                &self
-                    .info
-                    .network
-                    .network_interface
-                    .clone()
-                    .unwrap_or_default(),
-                &self.info.per_network_opts.interface_name,
-                self.info.netns_path,
-                &container_mac_address,
-            )?
-        }
+        dhcp_teardown(&self.info, netlink_sockets.1)?;
 
         let routes = core_utils::create_route_list(&self.info.network.routes)?;
         for route in routes.iter() {
@@ -265,12 +243,10 @@ fn setup(
     netns_fd: BorrowedFd<'_>,
     kind_data: &KindData,
 ) -> NetavarkResult<String> {
-    let primary_ifname = match data.host_interface_name.as_ref() {
+    let link = match data.host_interface_name.as_ref() {
         "" => get_default_route_interface(host)?,
-        host_name => host_name.to_string(),
+        host_name => host.get_link(netlink::LinkID::Name(host_name.to_string()))?,
     };
-
-    let link = host.get_link(netlink::LinkID::Name(primary_ifname))?;
 
     let opts = match kind_data {
         KindData::IpVlan { mode } => {
@@ -314,7 +290,7 @@ fn setup(
 
             Err(err) => match err {
                 NetavarkError::Netlink(ref e) if -e.raw_code() == libc::EEXIST => {
-                    let random = Alphanumeric.sample_string(&mut rand::thread_rng(), 10);
+                    let random = Alphanumeric.sample_string(&mut rand::rng(), 10);
                     let tmp_name = "mv-".to_string() + &random;
                     let mut opts = opts.clone();
                     opts.name.clone_from(&tmp_name);
@@ -336,17 +312,13 @@ fn setup(
                     netns
                         .set_link_name(link.header.index, if_name.to_string())
                         .wrap(format!("rename tmp {kind_data} interface"))
-                        .map_err(|err| {
+                        .inspect_err(|_| {
                             // If there is an error here most likely the name in the netns is already used,
                             // make sure to delete the tmp interface.
                             if let Err(err) = netns.del_link(netlink::LinkID::ID(link.header.index))
                             {
-                                error!(
-                                    "failed to delete tmp {} link {}: {}",
-                                    kind_data, tmp_name, err
-                                );
+                                error!("failed to delete tmp {kind_data} link {tmp_name}: {err}");
                             };
-                            err
                         })?;
 
                     // successful run, break out of loop
@@ -357,8 +329,7 @@ fn setup(
         }
     }
 
-    exec_netns!(hostns_fd, netns_fd, res, { disable_ipv6_autoconf(if_name) });
-    res?; // return autoconf sysctl error
+    exec_netns!(hostns_fd, netns_fd, { disable_ipv6_autoconf(if_name) })?;
 
     let dev = netns
         .get_link(netlink::LinkID::Name(if_name.to_string()))
@@ -384,49 +355,4 @@ fn setup(
     }
 
     get_mac_address(dev.attributes)
-}
-
-fn get_mac_address(v: Vec<LinkAttribute>) -> NetavarkResult<String> {
-    for nla in v.into_iter() {
-        if let LinkAttribute::Address(ref addr) = nla {
-            return Ok(CoreUtils::encode_address_to_hex(addr));
-        }
-    }
-    Err(NetavarkError::msg(
-        "failed to get the the container mac address",
-    ))
-}
-
-fn get_default_route_interface(host: &mut netlink::Socket) -> NetavarkResult<String> {
-    let routes = host.dump_routes().wrap("dump routes")?;
-
-    for route in routes {
-        let mut dest = false;
-        let mut out_if = 0;
-        for nla in route.attributes {
-            if let netlink_packet_route::route::RouteAttribute::Destination(_) = nla {
-                dest = true;
-            }
-            if let netlink_packet_route::route::RouteAttribute::Oif(oif) = nla {
-                out_if = oif;
-            }
-        }
-
-        // if there is no dest we have a default route
-        // return the output interface for this route
-        if !dest && out_if > 0 {
-            let link = host.get_link(netlink::LinkID::ID(out_if))?;
-            let name = link.attributes.iter().find_map(|nla| {
-                if let LinkAttribute::IfName(name) = nla {
-                    Some(name)
-                } else {
-                    None
-                }
-            });
-            if let Some(name) = name {
-                return Ok(name.to_owned());
-            }
-        }
-    }
-    Err(NetavarkError::msg("failed to get default route interface"))
 }

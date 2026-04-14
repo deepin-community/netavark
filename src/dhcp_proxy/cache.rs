@@ -43,7 +43,7 @@ impl<W: Write + Clear> LeaseCache<W> {
     /// # Arguments
     ///
     /// * `writer`: any type that can has the Write and Clear trait implemented. In production this
-    /// is a file. In development/testing this is a Cursor of bytes
+    ///   is a file. In development/testing this is a Cursor of bytes
     ///
     /// returns: Result<LeaseCache<W>, Error>
     ///
@@ -64,7 +64,7 @@ impl<W: Write + Clear> LeaseCache<W> {
     /// returns: Result<(), Error>
     ///
     pub fn add_lease(&mut self, mac_addr: &str, lease: &NetavarkLease) -> Result<(), io::Error> {
-        debug!("add lease: {:?}", mac_addr);
+        debug!("add lease: {mac_addr:?}");
         // Update cache memory with new lease
         let cache = &mut self.mem;
         cache.insert(mac_addr.to_string(), vec![lease.clone()]);
@@ -95,7 +95,7 @@ impl<W: Write + Clear> LeaseCache<W> {
     ///
     /// * `mac_addr`: Mac address of the container
     pub fn remove_lease(&mut self, mac_addr: &str) -> Result<Lease, io::Error> {
-        debug!("remove lease: {:?}", mac_addr);
+        debug!("remove lease: {mac_addr:?}");
         let mem = &mut self.mem;
         // Check and see if the lease exists, if not create an empty one
         let lease = match mem.get(mac_addr) {
@@ -150,10 +150,7 @@ impl<W: Write + Clear> LeaseCache<W> {
                 writer.flush()
             }
             Err(e) => {
-                error!(
-                    "Could not clear the writer. Not updating lease information: {:?}",
-                    e
-                );
+                error!("Could not clear the writer. Not updating lease information: {e:?}");
                 Ok(())
             }
         }
@@ -176,31 +173,31 @@ mod cache_tests {
     use super::super::cache::LeaseCache;
     use super::super::lib::g_rpc::{Lease as NetavarkLease, Lease};
     use crate::network::core_utils;
-    use rand::{thread_rng, Rng};
+    use rand::{rng, Rng};
     use std::collections::HashMap;
     use std::io::Cursor;
 
     // Create a single random ipv4 addr
     fn random_ipv4() -> String {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         format!(
             "{:?}.{:?}.{:?}.{:?}.",
-            rng.gen_range(0..255),
-            rng.gen_range(0..255),
-            rng.gen_range(0..255),
-            rng.gen_range(0..255)
+            rng.random_range(0..255),
+            rng.random_range(0..255),
+            rng.random_range(0..255),
+            rng.random_range(0..255)
         )
     }
     // Create a single random mac address
     fn random_macaddr() -> String {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let bytes = vec![
-            rng.gen::<u8>(),
-            rng.gen::<u8>(),
-            rng.gen::<u8>(),
-            rng.gen::<u8>(),
-            rng.gen::<u8>(),
-            rng.gen::<u8>(),
+            rng.random::<u8>(),
+            rng.random::<u8>(),
+            rng.random::<u8>(),
+            rng.random::<u8>(),
+            rng.random::<u8>(),
+            rng.random::<u8>(),
         ];
         core_utils::CoreUtils::encode_address_to_hex(&bytes)
     }
@@ -243,9 +240,9 @@ mod cache_tests {
 
             // Create a random amount of randomized leases
             let macaddrs = Vec::new();
-            let mut rng = thread_rng();
+            let mut rng = rng();
             // Make a random amount of leases
-            let range: u8 = rng.gen_range(0..10);
+            let range: u8 = rng.random_range(0..10);
 
             CacheTestSetup {
                 cache,
@@ -288,7 +285,7 @@ mod cache_tests {
             let deserialized_lease = s
                 .get(macaddr)
                 .expect("Could not get the mac address from the map")
-                .get(0)
+                .first()
                 .expect("Could not get lease from set of mac addresses")
                 .clone();
             // Assure that the amount of leases added is correct amount
@@ -331,7 +328,7 @@ mod cache_tests {
             let deserialized_lease = s
                 .get(macaddr)
                 .expect("Could not get the mac address from the map")
-                .get(0)
+                .first()
                 .expect("Could not get lease from set of mac addresses")
                 .clone();
             // Assure that the amount of leases added is correct amount
@@ -354,7 +351,7 @@ mod cache_tests {
             let deserialized_lease = s
                 .get(macaddr)
                 .expect("Could not get the mac address from the map")
-                .get(0)
+                .first()
                 .expect("Could not get lease from set of mac addresses")
                 .clone();
 
@@ -418,7 +415,7 @@ mod cache_tests {
             let deserialized_lease = s
                 .get(macaddr)
                 .expect("Could not get the mac address from the map")
-                .get(0)
+                .first()
                 .expect("Could not get lease from set of mac addresses")
                 .clone();
             // Assure that the amount of leases added is correct amount
@@ -450,7 +447,7 @@ mod cache_tests {
             let deserialized_updated_lease = s
                 .get(macaddr)
                 .expect("Could not get lease from deserialized map")
-                .get(0)
+                .first()
                 .expect("Could not find lease in set of multi-homing leases");
 
             assert_eq!(deserialized_updated_lease, &new_lease);

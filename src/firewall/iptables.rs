@@ -41,7 +41,11 @@ impl firewall::FirewallDriver for IptablesDriver {
         firewall::IPTABLES
     }
 
-    fn setup_network(&self, network_setup: SetupNetwork) -> NetavarkResult<()> {
+    fn setup_network(
+        &self,
+        network_setup: SetupNetwork,
+        dbus_con: &Option<zbus::blocking::Connection>,
+    ) -> NetavarkResult<()> {
         if let Some(subnet) = network_setup.subnets {
             for network in subnet {
                 let is_ipv6 = network.network().is_ipv6();
@@ -62,7 +66,7 @@ impl firewall::FirewallDriver for IptablesDriver {
 
                 create_network_chains(chains)?;
 
-                firewalld::add_firewalld_if_possible(&network);
+                firewalld::add_firewalld_if_possible(dbus_con, &network);
             }
         }
         Ok(())
@@ -111,16 +115,20 @@ impl firewall::FirewallDriver for IptablesDriver {
         Result::Ok(())
     }
 
-    fn setup_port_forward(&self, setup_portfw: PortForwardConfig) -> NetavarkResult<()> {
+    fn setup_port_forward(
+        &self,
+        setup_portfw: PortForwardConfig,
+        dbus_con: &Option<zbus::blocking::Connection>,
+    ) -> NetavarkResult<()> {
+        firewalld::check_can_forward_ports(dbus_con, &setup_portfw)?;
+
         if let Some(v4) = setup_portfw.container_ip_v4 {
             let subnet_v4 = match setup_portfw.subnet_v4 {
                 Some(s) => s,
                 None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(NetavarkError::msg(
                         "ipv4 address but provided but no v4 subnet provided",
-                    )
-                    .into())
+                    ))
                 }
             };
             let chains =
@@ -131,11 +139,9 @@ impl firewall::FirewallDriver for IptablesDriver {
             let subnet_v6 = match setup_portfw.subnet_v6 {
                 Some(s) => s,
                 None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(NetavarkError::msg(
                         "ipv6 address but provided but no v6 subnet provided",
-                    )
-                    .into())
+                    ))
                 }
             };
             let chains =
@@ -150,11 +156,9 @@ impl firewall::FirewallDriver for IptablesDriver {
             let subnet_v4 = match tear.config.subnet_v4 {
                 Some(s) => s,
                 None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(NetavarkError::msg(
                         "ipv4 address but provided but no v4 subnet provided",
-                    )
-                    .into())
+                    ))
                 }
             };
 
@@ -183,11 +187,9 @@ impl firewall::FirewallDriver for IptablesDriver {
             let subnet_v6 = match tear.config.subnet_v6 {
                 Some(s) => s,
                 None => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(NetavarkError::msg(
                         "ipv6 address but provided but no v6 subnet provided",
-                    )
-                    .into())
+                    ))
                 }
             };
 

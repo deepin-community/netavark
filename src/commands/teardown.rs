@@ -9,6 +9,7 @@ use crate::{firewall, network};
 use clap::builder::NonEmptyStringValueParser;
 use clap::Parser;
 use log::debug;
+use nix::sys::signal;
 use std::ffi::OsString;
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -37,7 +38,16 @@ impl Teardown {
         plugin_directories: Option<Vec<OsString>>,
         rootless: bool,
     ) -> NetavarkResult<()> {
-        debug!("{:?}", "Tearing down..");
+        debug!("Tearing down..");
+
+        // SAFETY:  signal handlers are considered unsafe due to the care that must
+        //          taken when running code inside the handler function. We however
+        //          only ignore the signal so this is safe without having to worry
+        //          about any code restrictions.
+        // Also we ignore the returned error, this is best effort anyway and can only error when we would pass a invalid signal number.
+        let _ = unsafe { signal::signal(signal::SIGTERM, signal::SigHandler::SigIgn) };
+        let _ = unsafe { signal::signal(signal::SIGINT, signal::SigHandler::SigIgn) };
+
         let network_options = network::types::NetworkOptions::load(input_file)?;
 
         let mut error_list = NetavarkErrorList::new();
@@ -48,17 +58,25 @@ impl Teardown {
         let mut aardvark_entries = Vec::new();
         for (key, network) in &network_options.network_info {
             if network.dns_enabled && network.driver == DRIVER_BRIDGE {
-                aardvark_entries.push(AardvarkEntry {
-                    network_name: key,
-                    network_gateways: Vec::new(),
-                    network_dns_servers: &None,
-                    container_id: &network_options.container_id,
-                    container_ips_v4: Vec::new(),
-                    container_ips_v6: Vec::new(),
-                    container_names: Vec::new(),
-                    container_dns_servers: &None,
-                    is_internal: network.internal,
-                });
+                match network_options.container_id.as_str().try_into() {
+                    Ok(id) => {
+                        aardvark_entries.push(AardvarkEntry {
+                            network_name: key,
+                            network_gateways: Vec::new(),
+                            network_dns_servers: &None,
+                            container_id: id,
+                            container_ips_v4: Vec::new(),
+                            container_ips_v6: Vec::new(),
+                            container_names: Vec::new(),
+                            container_dns_servers: &None,
+                            is_internal: network.internal,
+                        });
+                    }
+                    Err(err) => log::warn!(
+                        "invalid container id {}: {err}",
+                        network_options.container_id
+                    ),
+                }
             }
         }
 
@@ -67,15 +85,12 @@ impl Teardown {
             let path = Path::new(&config_dir).join("aardvark-dns");
 
             let aardvark_interface = Aardvark::new(path, rootless, aardvark_bin, dns_port);
-            if let Err(err) = aardvark_interface.delete_from_netavark_entries(aardvark_entries) {
+            if let Err(err) = aardvark_interface.delete_from_netavark_entries(&aardvark_entries) {
                 error_list.push(NetavarkError::wrap("remove aardvark entries", err));
             }
         }
 
-        let firewall_driver = match firewall::get_supported_firewall_driver(firewall_driver) {
-            Ok(driver) => driver,
-            Err(e) => return Err(e),
-        };
+        let firewall_driver = firewall::get_supported_firewall_driver(firewall_driver)?;
 
         let (mut hostns, mut netns) =
             core_utils::open_netlink_sockets(&self.network_namespace_path)?;
@@ -96,6 +111,7 @@ impl Teardown {
                     firewall: firewall_driver.as_ref(),
                     container_id: &network_options.container_id,
                     container_name: &network_options.container_name,
+                    container_hostname: &network_options.container_hostname,
                     container_dns_servers: &network_options.dns_servers,
                     netns_host: hostns.file.as_fd(),
                     netns_container: netns.file.as_fd(),
@@ -129,7 +145,7 @@ impl Teardown {
             return Err(NetavarkError::List(error_list));
         }
 
-        debug!("{:?}", "Teardown complete");
+        debug!("Teardown complete");
         Ok(())
     }
 }

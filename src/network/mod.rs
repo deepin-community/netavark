@@ -13,11 +13,12 @@ use crate::{
 pub mod bridge;
 pub mod constants;
 pub mod core_utils;
+mod dhcp;
 pub mod driver;
 pub mod internal_types;
-mod macvlan_dhcp;
 pub mod netlink;
 pub mod plugin;
+pub mod sysctl;
 pub mod vlan;
 
 impl types::NetworkOptions {

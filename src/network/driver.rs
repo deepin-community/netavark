@@ -29,6 +29,7 @@ pub struct DriverInfo<'a> {
     pub dns_port: u16,
     pub config_dir: &'a Path,
     pub rootless: bool,
+    pub container_hostname: &'a Option<String>,
 }
 
 pub trait NetworkDriver {
@@ -38,7 +39,7 @@ pub trait NetworkDriver {
     fn setup(
         &self,
         netlink_sockets: (&mut netlink::Socket, &mut netlink::Socket),
-    ) -> NetavarkResult<(StatusBlock, Option<AardvarkEntry>)>;
+    ) -> NetavarkResult<(StatusBlock, Option<AardvarkEntry<'_>>)>;
     /// teardown the network interfaces/firewall rules for this driver
     fn teardown(
         &self,

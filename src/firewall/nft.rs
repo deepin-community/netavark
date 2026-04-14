@@ -11,8 +11,10 @@ use nftables::helper::{self};
 use nftables::schema;
 use nftables::stmt;
 use nftables::types;
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::ops::Deref;
 
 const TABLENAME: &str = "netavark";
 
@@ -37,6 +39,8 @@ const SRCNATPRIO: i32 = 100;
 /// The filter priority for chains
 const FILTERPRIO: i32 = 0;
 
+const IPV4_LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
 pub struct Nftables {}
 
 pub fn new() -> Result<Box<dyn firewall::FirewallDriver>, NetavarkError> {
@@ -48,14 +52,19 @@ impl firewall::FirewallDriver for Nftables {
         firewall::NFTABLES
     }
 
-    fn setup_network(&self, network_setup: internal_types::SetupNetwork) -> NetavarkResult<()> {
+    fn setup_network(
+        &self,
+        network_setup: internal_types::SetupNetwork,
+        dbus_conn: &Option<zbus::blocking::Connection>,
+    ) -> NetavarkResult<()> {
         let mut batch = Batch::new();
 
         // Overall table
-        batch.add(schema::NfListObject::Table(schema::Table::new(
-            types::NfFamily::INet,
-            TABLENAME.to_string(),
-        )));
+        batch.add(schema::NfListObject::Table(schema::Table {
+            family: types::NfFamily::INet,
+            name: Cow::Borrowed(TABLENAME),
+            ..schema::Table::default()
+        }));
 
         // Five default chains, one for each hook we have to monitor
         batch.add(make_complex_chain(
@@ -94,19 +103,19 @@ impl firewall::FirewallDriver for Nftables {
         let existing_rules = get_netavark_rules()?;
 
         // Two extra chains, not hooked to anything, for our NAT pf rules
-        batch.add(make_basic_chain(DNATCHAIN));
-        batch.add(make_basic_chain(MASKCHAIN));
+        batch.add(make_basic_chain(Cow::Borrowed(DNATCHAIN)));
+        batch.add(make_basic_chain(Cow::Borrowed(MASKCHAIN)));
 
         // Three extra chains, not hooked to anything, for isolation.
-        batch.add(make_basic_chain(ISOLATION1CHAIN));
-        batch.add(make_basic_chain(ISOLATION2CHAIN));
-        batch.add(make_basic_chain(ISOLATION3CHAIN));
+        batch.add(make_basic_chain(Cow::Borrowed(ISOLATION1CHAIN)));
+        batch.add(make_basic_chain(Cow::Borrowed(ISOLATION2CHAIN)));
+        batch.add(make_basic_chain(Cow::Borrowed(ISOLATION3CHAIN)));
 
         // Postrouting chain needs a single rule to masquerade if mask is set.
         // But only one copy of that rule. So check if such a rule exists.
         let match_meta_masq = |r: &schema::Rule| -> bool {
             // Match on any rule that matches against 0x2000
-            for statement in &r.expr {
+            for statement in r.expr.deref() {
                 match statement {
                     stmt::Statement::Match(m) => match &m.right {
                         expr::Expression::Number(n) => {
@@ -126,22 +135,22 @@ impl firewall::FirewallDriver for Nftables {
         {
             // Postrouting: meta mark & 0x2000 == 0x2000 masquerade
             batch.add(make_rule(
-                POSTROUTINGCHAIN,
-                vec![
+                Cow::Borrowed(POSTROUTINGCHAIN),
+                Cow::Owned(vec![
                     stmt::Statement::Match(stmt::Match {
-                        left: expr::Expression::BinaryOperation(expr::BinaryOperation::AND(
-                            Box::new(expr::Expression::Named(expr::NamedExpression::Meta(
-                                expr::Meta {
+                        left: expr::Expression::BinaryOperation(Box::new(
+                            expr::BinaryOperation::AND(
+                                expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta {
                                     key: expr::MetaKey::Mark,
-                                },
-                            ))),
-                            Box::new(expr::Expression::Number(MASK)),
+                                })),
+                                expr::Expression::Number(MASK),
+                            ),
                         )),
                         right: expr::Expression::Number(MASK),
                         op: stmt::Operator::EQ,
                     }),
                     stmt::Statement::Masquerade(None),
-                ],
+                ]),
             ));
         }
 
@@ -149,7 +158,7 @@ impl firewall::FirewallDriver for Nftables {
         // But only one copy of that rule. So check if such a rule exists.
         let match_meta_mark = |r: &schema::Rule| -> bool {
             // Match on any mangle rule.
-            for statement in &r.expr {
+            for statement in r.expr.deref() {
                 match statement {
                     stmt::Statement::Mangle(_) => return true,
                     _ => continue,
@@ -160,20 +169,20 @@ impl firewall::FirewallDriver for Nftables {
         if get_matching_rules_in_chain(&existing_rules, MASKCHAIN, match_meta_mark).is_empty() {
             // Mask chain: mark or 0x2000
             batch.add(make_rule(
-                MASKCHAIN,
-                vec![stmt::Statement::Mangle(stmt::Mangle {
+                Cow::Borrowed(MASKCHAIN),
+                Cow::Owned(vec![stmt::Statement::Mangle(stmt::Mangle {
                     key: expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta {
                         key: expr::MetaKey::Mark,
                     })),
-                    value: expr::Expression::BinaryOperation(expr::BinaryOperation::OR(
-                        Box::new(expr::Expression::Named(expr::NamedExpression::Meta(
-                            expr::Meta {
+                    value: expr::Expression::BinaryOperation(Box::new(expr::BinaryOperation::OR(
+                        vec![
+                            expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta {
                                 key: expr::MetaKey::Mark,
-                            },
-                        ))),
-                        Box::new(expr::Expression::Number(MASK)),
-                    )),
-                })],
+                            })),
+                            expr::Expression::Number(MASK),
+                        ],
+                    ))),
+                })]),
             ));
         }
 
@@ -184,29 +193,35 @@ impl firewall::FirewallDriver for Nftables {
         // Output: fib daddr type local jump <dnat_chain>
         let mut rules_hash: HashSet<expr::FibFlag> = HashSet::new();
         rules_hash.insert(expr::FibFlag::Daddr);
-        let base_conditions: Vec<stmt::Statement> = vec![
+        let base_conditions = [
             stmt::Statement::Match(stmt::Match {
                 left: expr::Expression::Named(expr::NamedExpression::Fib(expr::Fib {
                     result: expr::FibResult::Type,
                     flags: rules_hash,
                 })),
-                right: expr::Expression::String("local".to_string()),
+                right: expr::Expression::String(Cow::Borrowed("local")),
                 op: stmt::Operator::EQ,
             }),
-            get_jump_action(DNATCHAIN),
+            get_jump_action(Cow::Borrowed(DNATCHAIN)),
         ];
         if get_matching_rules_in_chain(&existing_rules, PREROUTINGCHAIN, &match_jump_dnat)
             .is_empty()
         {
-            batch.add(make_rule(PREROUTINGCHAIN, base_conditions.clone()));
+            batch.add(make_rule(
+                Cow::Borrowed(PREROUTINGCHAIN),
+                Cow::Borrowed(&base_conditions),
+            ));
         }
         if get_matching_rules_in_chain(&existing_rules, OUTPUTCHAIN, &match_jump_dnat).is_empty() {
-            batch.add(make_rule(OUTPUTCHAIN, base_conditions.clone()));
+            batch.add(make_rule(
+                Cow::Borrowed(OUTPUTCHAIN),
+                Cow::Borrowed(&base_conditions),
+            ));
         }
 
         // Forward chain: ct state invalid drop
         let match_deny = |r: &schema::Rule| -> bool {
-            for statement in &r.expr {
+            for statement in r.expr.deref() {
                 match statement {
                     stmt::Statement::Drop(_) => return true,
                     _ => continue,
@@ -216,19 +231,19 @@ impl firewall::FirewallDriver for Nftables {
         };
         if get_matching_rules_in_chain(&existing_rules, FORWARDCHAIN, match_deny).is_empty() {
             batch.add(make_rule(
-                FORWARDCHAIN,
-                vec![
+                Cow::Borrowed(FORWARDCHAIN),
+                Cow::Borrowed(&[
                     stmt::Statement::Match(stmt::Match {
                         left: expr::Expression::Named(expr::NamedExpression::CT(expr::CT {
-                            key: "state".to_string(),
+                            key: Cow::Borrowed("state"),
                             family: None,
                             dir: None,
                         })),
-                        right: expr::Expression::String("invalid".to_string()),
+                        right: expr::Expression::String(Cow::Borrowed("invalid")),
                         op: stmt::Operator::IN,
                     }),
                     stmt::Statement::Drop(None),
-                ],
+                ]),
             ));
         }
 
@@ -241,8 +256,8 @@ impl firewall::FirewallDriver for Nftables {
         .is_empty()
         {
             batch.add(make_rule(
-                FORWARDCHAIN,
-                vec![get_jump_action(ISOLATION1CHAIN)],
+                Cow::Borrowed(FORWARDCHAIN),
+                Cow::Owned(vec![get_jump_action(Cow::Borrowed(ISOLATION1CHAIN))]),
             ));
         }
 
@@ -263,15 +278,17 @@ impl firewall::FirewallDriver for Nftables {
                 .is_empty()
             {
                 batch.add(make_rule(
-                    ISOLATION1CHAIN,
-                    vec![
+                    Cow::Borrowed(ISOLATION1CHAIN),
+                    Cow::Owned(vec![
                         stmt::Statement::Match(stmt::Match {
                             left: expr::Expression::Named(expr::NamedExpression::Meta(
                                 expr::Meta {
                                     key: expr::MetaKey::Iifname,
                                 },
                             )),
-                            right: expr::Expression::String(network_setup.bridge_name.clone()),
+                            right: expr::Expression::String(Cow::Borrowed(
+                                &network_setup.bridge_name,
+                            )),
                             op: stmt::Operator::EQ,
                         }),
                         stmt::Statement::Match(stmt::Match {
@@ -280,11 +297,13 @@ impl firewall::FirewallDriver for Nftables {
                                     key: expr::MetaKey::Oifname,
                                 },
                             )),
-                            right: expr::Expression::String(network_setup.bridge_name.clone()),
+                            right: expr::Expression::String(Cow::Borrowed(
+                                &network_setup.bridge_name,
+                            )),
                             op: stmt::Operator::NEQ,
                         }),
-                        get_jump_action(isolation_1_jump_target),
-                    ],
+                        get_jump_action(Cow::Borrowed(isolation_1_jump_target)),
+                    ]),
                 ));
             }
 
@@ -293,11 +312,11 @@ impl firewall::FirewallDriver for Nftables {
                 .is_empty()
             {
                 batch.add(make_rule(
-                    ISOLATION2CHAIN,
-                    vec![
+                    Cow::Borrowed(ISOLATION2CHAIN),
+                    Cow::Owned(vec![
                         get_dest_bridge_match(&network_setup.bridge_name),
                         stmt::Statement::Drop(None),
-                    ],
+                    ]),
                 ));
             }
         } else {
@@ -308,11 +327,11 @@ impl firewall::FirewallDriver for Nftables {
                 .is_empty()
             {
                 batch.add_cmd(schema::NfCmd::Insert(make_rule(
-                    ISOLATION3CHAIN,
-                    vec![
+                    Cow::Borrowed(ISOLATION3CHAIN),
+                    Cow::Owned(vec![
                         get_dest_bridge_match(&network_setup.bridge_name),
                         stmt::Statement::Drop(None),
-                    ],
+                    ]),
                 )));
             }
         }
@@ -327,8 +346,8 @@ impl firewall::FirewallDriver for Nftables {
         .is_empty()
         {
             batch.add(make_rule(
-                ISOLATION3CHAIN,
-                vec![get_jump_action(ISOLATION2CHAIN)],
+                Cow::Borrowed(ISOLATION3CHAIN),
+                Cow::Owned(vec![get_jump_action(Cow::Borrowed(ISOLATION2CHAIN))]),
             ));
         }
 
@@ -339,25 +358,24 @@ impl firewall::FirewallDriver for Nftables {
 
                 // Add us to firewalld if necessary.
                 // Do this first, as firewalld doesn't wipe our rules - so after a reload, we skip everything below.
-                firewalld::add_firewalld_if_possible(&subnet);
+                firewalld::add_firewalld_if_possible(dbus_conn, &subnet);
 
                 // Do we already have a chain for the subnet?
                 if get_chain(&existing_rules, &chain).is_some() {
                     continue;
                 }
 
-                // We don't. Make one.
-                batch.add(make_basic_chain(&chain));
-
                 log::info!("Creating container chain {chain}");
+                // We don't. Make one.
+                batch.add(make_basic_chain(chain.clone()));
 
                 // Subnet chain: ip daddr <subnet> accept
                 batch.add(make_rule(
-                    &chain,
-                    vec![
+                    chain.clone(),
+                    Cow::Owned(vec![
                         get_subnet_match(&subnet, "daddr", stmt::Operator::EQ),
                         stmt::Statement::Accept(None),
-                    ],
+                    ]),
                 ));
 
                 // Subnet chain: ip daddr != 224.0.0.0/4 masquerade
@@ -366,74 +384,90 @@ impl firewall::FirewallDriver for Nftables {
                     IpNet::V6(_) => "ff::00/8".parse()?,
                 };
                 batch.add(make_rule(
-                    &chain,
-                    vec![
+                    chain.clone(),
+                    Cow::Owned(vec![
                         get_subnet_match(&multicast_address, "daddr", stmt::Operator::NEQ),
                         stmt::Statement::Masquerade(None),
-                    ],
+                    ]),
                 ));
 
                 // Next, populate basic chains with forwarding rules
                 // Input chain: ip saddr <subnet> udp dport 53 accept
                 batch.add(make_rule(
-                    INPUTCHAIN,
-                    vec![
+                    Cow::Borrowed(INPUTCHAIN),
+                    Cow::Owned(vec![
                         get_subnet_match(&subnet, "saddr", stmt::Operator::EQ),
+                        stmt::Statement::Match(stmt::Match {
+                            left: expr::Expression::Named(expr::NamedExpression::Meta(
+                                expr::Meta {
+                                    key: expr::MetaKey::L4proto,
+                                },
+                            )),
+                            right: expr::Expression::Named(expr::NamedExpression::Set(vec![
+                                expr::SetItem::Element(expr::Expression::String(Cow::Borrowed(
+                                    "udp",
+                                ))),
+                                expr::SetItem::Element(expr::Expression::String(Cow::Borrowed(
+                                    "tcp",
+                                ))),
+                            ])),
+                            op: stmt::Operator::EQ,
+                        }),
                         stmt::Statement::Match(stmt::Match {
                             left: expr::Expression::Named(expr::NamedExpression::Payload(
                                 expr::Payload::PayloadField(expr::PayloadField {
-                                    protocol: "udp".to_string(),
-                                    field: "dport".to_string(),
+                                    protocol: Cow::Borrowed("th"),
+                                    field: Cow::Borrowed("dport"),
                                 }),
                             )),
                             right: expr::Expression::Number(53),
                             op: stmt::Operator::EQ,
                         }),
                         stmt::Statement::Accept(None),
-                    ],
+                    ]),
                 ));
                 // Forward chain: ip daddr <subnet> ct state related,established accept
                 batch.add(make_rule(
-                    FORWARDCHAIN,
-                    vec![
+                    Cow::Borrowed(FORWARDCHAIN),
+                    Cow::Owned(vec![
                         get_subnet_match(&subnet, "daddr", stmt::Operator::EQ),
                         stmt::Statement::Match(stmt::Match {
                             left: expr::Expression::Named(expr::NamedExpression::CT(expr::CT {
-                                key: "state".to_string(),
+                                key: Cow::Borrowed("state"),
                                 family: None,
                                 dir: None,
                             })),
                             right: expr::Expression::List(vec![
-                                expr::Expression::String("established".to_string()),
-                                expr::Expression::String("related".to_string()),
+                                expr::Expression::String(Cow::Borrowed("established")),
+                                expr::Expression::String(Cow::Borrowed("related")),
                             ]),
                             op: stmt::Operator::IN,
                         }),
                         stmt::Statement::Accept(None),
-                    ],
+                    ]),
                 ));
                 // Forward chain: ip saddr <subnet> accept
                 batch.add(make_rule(
-                    FORWARDCHAIN,
-                    vec![
+                    Cow::Borrowed(FORWARDCHAIN),
+                    Cow::Owned(vec![
                         get_subnet_match(&subnet, "saddr", stmt::Operator::EQ),
                         stmt::Statement::Accept(None),
-                    ],
+                    ]),
                 ));
                 // Postrouting chain: ip saddr <subnet> jump <chain>
                 batch.add(make_rule(
-                    POSTROUTINGCHAIN,
-                    vec![
+                    Cow::Borrowed(POSTROUTINGCHAIN),
+                    Cow::Owned(vec![
                         get_subnet_match(&subnet, "saddr", stmt::Operator::EQ),
-                        get_jump_action(&chain),
-                    ],
+                        get_jump_action(chain.clone()),
+                    ]),
                 ));
             }
         }
 
         let rules = batch.to_nftables();
 
-        helper::apply_ruleset(&rules, None, None)?;
+        helper::apply_ruleset(&rules)?;
 
         Ok(())
     }
@@ -449,7 +483,7 @@ impl firewall::FirewallDriver for Nftables {
                 let match_subnet = |r: &schema::Rule| -> bool {
                     // Statement matching: We only care about match statements.
                     // Don't bother with left side. Just check if what they compare to is our subnet.
-                    for statement in &r.expr {
+                    for statement in r.expr.deref() {
                         match statement {
                             stmt::Statement::Match(m) => match &m.right {
                                 expr::Expression::Named(expr::NamedExpression::Prefix(p)) => {
@@ -535,14 +569,17 @@ impl firewall::FirewallDriver for Nftables {
 
         let rules = batch.to_nftables();
 
-        helper::apply_ruleset(&rules, None, None)?;
+        helper::apply_ruleset(&rules)?;
         Ok(())
     }
 
     fn setup_port_forward(
         &self,
         setup_portfw: internal_types::PortForwardConfig,
+        dbus_conn: &Option<zbus::blocking::Connection>,
     ) -> NetavarkResult<()> {
+        firewalld::check_can_forward_ports(dbus_conn, &setup_portfw)?;
+
         let mut batch = Batch::new();
 
         let existing_rules = get_netavark_rules()?;
@@ -552,7 +589,7 @@ impl firewall::FirewallDriver for Nftables {
         if setup_portfw.dns_port != 53 {
             for ip in setup_portfw.dns_server_ips {
                 let match_dns_ip_dnat = |r: &schema::Rule| {
-                    for statement in &r.expr {
+                    for statement in r.expr.deref() {
                         match statement {
                             stmt::Statement::Match(m) => match &m.right {
                                 expr::Expression::String(s) => {
@@ -578,12 +615,22 @@ impl firewall::FirewallDriver for Nftables {
                 match ip {
                     IpAddr::V4(_) => {
                         if setup_portfw.container_ip_v4.is_some() {
-                            batch.add(make_dns_dnat_rule(ip, setup_portfw.dns_port));
+                            // rule should be first so it is ordered before the normal contianer DNAT,
+                            // thus  use insert over the normal add
+                            batch.add_cmd(schema::NfCmd::Insert(make_dns_dnat_rule(
+                                ip,
+                                setup_portfw.dns_port,
+                            )));
                         }
                     }
                     IpAddr::V6(_) => {
                         if setup_portfw.container_ip_v6.is_some() {
-                            batch.add(make_dns_dnat_rule(ip, setup_portfw.dns_port));
+                            // rule should be first so it is ordered before the normal contianer DNAT,
+                            // thus  use insert over the normal add
+                            batch.add_cmd(schema::NfCmd::Insert(make_dns_dnat_rule(
+                                ip,
+                                setup_portfw.dns_port,
+                            )));
                         }
                     }
                 }
@@ -619,7 +666,7 @@ impl firewall::FirewallDriver for Nftables {
 
         let rules = batch.to_nftables();
 
-        helper::apply_ruleset(&rules, None, None)?;
+        helper::apply_ruleset(&rules)?;
 
         Ok(())
     }
@@ -641,159 +688,20 @@ impl firewall::FirewallDriver for Nftables {
             .subnet_v6
             .map(|s| get_subnet_chain_name(s, &teardown_pf.config.network_id, true));
 
-        // We need two matchers for each port.
-        // One matching both the port and jumping to either the V4 or V6 chain (to clean NETAVARK_DNAT)
-        // One matching just the port, to clean the v4 and v6 chains for the network.
-        // As a bonus, the last one needs to match any individual port inside the range.
-        if let Some(ports) = teardown_pf.config.port_mappings {
-            for port in ports {
-                let matcher_port_jump = |r: &schema::Rule| -> bool {
-                    let mut match_jump = false;
-                    let mut match_port = false;
-                    for stmt in &r.expr {
-                        // Basically, check for match and jump statements.
-                        // For match, check that the right side is appropriate
-                        // for our port mapping. Has to handle range vs
-                        // singleton.
-                        // For jump, make sure that it matches either the v4 or
-                        // v6 DNAT chains.
-                        // If we find both, the rule matches.
-                        match stmt {
-                            stmt::Statement::Match(m) => match &m.right {
-                                expr::Expression::Number(n) => {
-                                    if port.range <= 1 && port.host_port as u32 == *n {
-                                        if match_jump {
-                                            return true;
-                                        }
-                                        match_port = true;
-                                    }
-                                }
-                                expr::Expression::Range(r) => {
-                                    if port.range > 1 {
-                                        if r.range.len() != 2 {
-                                            // Malformed range, just return false
-                                            return false;
-                                        }
-                                        match r.range[0] {
-                                            expr::Expression::Number(n) => {
-                                                if port.host_port as u32 != n {
-                                                    continue;
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                        match r.range[1] {
-                                            expr::Expression::Number(n) => {
-                                                if (port.host_port + port.range - 1) as u32 == n {
-                                                    if match_jump {
-                                                        return true;
-                                                    }
-                                                    match_port = true;
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                    }
-                                }
-                                _ => continue,
-                            },
-                            stmt::Statement::Jump(j) => {
-                                if let Some(v4) = &dnat_chain_v4 {
-                                    if &j.target == v4 {
-                                        if match_port {
-                                            return true;
-                                        }
-                                        match_jump = true;
-                                    }
-                                }
-                                if let Some(v6) = &dnat_chain_v6 {
-                                    if &j.target == v6 {
-                                        if match_port {
-                                            return true;
-                                        }
-                                        match_jump = true
-                                    }
-                                }
-                            }
-                            _ => continue,
-                        }
-                    }
-                    match_jump && match_port
-                };
-
-                let match_all_ports_in_range = |r: &schema::Rule| -> bool {
-                    for stmt in &r.expr {
-                        match stmt {
-                            stmt::Statement::Match(m) => match &m.right {
-                                expr::Expression::Number(n) => {
-                                    if port.range <= 1 && *n == port.host_port as u32 {
-                                        return true;
-                                    }
-                                    if port.range > 1
-                                        && *n >= port.host_port as u32
-                                        && *n <= (port.host_port + port.range - 1) as u32
-                                    {
-                                        return true;
-                                    }
-                                }
-                                expr::Expression::Range(r) => {
-                                    if port.range > 1 {
-                                        if r.range.len() != 2 {
-                                            // Malformed range, just return false
-                                            return false;
-                                        }
-                                        match r.range[0] {
-                                            expr::Expression::Number(n) => {
-                                                if port.host_port as u32 != n {
-                                                    continue;
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                        match r.range[1] {
-                                            expr::Expression::Number(n) => {
-                                                if (port.host_port + port.range - 1) as u32 == n {
-                                                    return true;
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                    }
-                                }
-                                _ => continue,
-                            },
-                            _ => continue,
-                        }
-                    }
-                    false
-                };
-
-                for rule in
-                    get_matching_rules_in_chain(&existing_rules, DNATCHAIN, matcher_port_jump)
-                {
-                    batch.delete(schema::NfListObject::Rule(rule));
-                }
-
-                if let Some(v4) = &dnat_chain_v4 {
-                    for rule in
-                        get_matching_rules_in_chain(&existing_rules, v4, match_all_ports_in_range)
-                    {
-                        batch.delete(schema::NfListObject::Rule(rule));
-                    }
-                }
-                if let Some(v6) = &dnat_chain_v6 {
-                    for rule in
-                        get_matching_rules_in_chain(&existing_rules, v6, match_all_ports_in_range)
-                    {
-                        batch.delete(schema::NfListObject::Rule(rule));
-                    }
-                }
+        if let Some(ip_v4) = teardown_pf.config.container_ip_v4 {
+            if let Some(subnet_v4) = teardown_pf.config.subnet_v4 {
+                delete_port_rules(ip_v4, subnet_v4, &teardown_pf, &existing_rules, &mut batch)?;
+            }
+        }
+        if let Some(ip_v6) = teardown_pf.config.container_ip_v6 {
+            if let Some(subnet_v6) = teardown_pf.config.subnet_v6 {
+                delete_port_rules(ip_v6, subnet_v6, &teardown_pf, &existing_rules, &mut batch)?;
             }
         }
 
         if teardown_pf.complete_teardown {
             let match_dns_dnat = |r: &schema::Rule| -> bool {
-                for statement in &r.expr {
+                for statement in r.expr.deref() {
                     match statement {
                         // Match any DNS server IP
                         stmt::Statement::Match(m) => match &m.right {
@@ -829,14 +737,63 @@ impl firewall::FirewallDriver for Nftables {
 
         let rules = batch.to_nftables();
 
-        helper::apply_ruleset(&rules, None, None)?;
+        helper::apply_ruleset(&rules)?;
 
         Ok(())
     }
 }
 
+// compare two rules, we only check the chain name and expr,
+// while we can do rule1 == rule2 it will not work how we like.
+// As we use this to compare rules from nft against rules created
+// by us in memory it means the handle id and index can never match.
+fn cmp_rules(rule1: &schema::Rule, rule2: &schema::Rule) -> bool {
+    if rule1.chain == rule2.chain && rule1.expr.deref() == rule2.expr.deref() {
+        return true;
+    }
+    false
+}
+
+fn delete_port_rules<'a>(
+    ip: IpAddr,
+    subnet: IpNet,
+    teardown_pf: &internal_types::TeardownPortForward,
+    existing_rules: &schema::Nftables<'a>,
+    batch: &mut Batch<'a>,
+) -> NetavarkResult<()> {
+    let port_rules = get_dnat_rules_for_addr_family(
+        ip,
+        subnet,
+        &teardown_pf.config.network_id,
+        existing_rules,
+        &teardown_pf.config,
+    )?;
+
+    for object in existing_rules.objects.deref() {
+        match object {
+            schema::NfObject::CmdObject(_) => continue,
+            schema::NfObject::ListObject(list) => match list {
+                schema::NfListObject::Rule(rule) => {
+                    for port_rule in &port_rules {
+                        match port_rule {
+                            schema::NfListObject::Rule(r) => {
+                                if cmp_rules(r, rule) {
+                                    batch.delete(list.clone());
+                                }
+                            }
+                            _ => continue,
+                        }
+                    }
+                }
+                _ => continue,
+            },
+        }
+    }
+    Ok(())
+}
+
 /// Convert a subnet into a chain name.
-fn get_subnet_chain_name(subnet: IpNet, net_id: &str, dnat: bool) -> String {
+fn get_subnet_chain_name(subnet: IpNet, net_id: &str, dnat: bool) -> Cow<'_, str> {
     // nftables is very lenient around chain name lengths.
     // So let's use the full IP to be unambiguous.
     // Replace . and : with _, and / with _nm (netmask), to remove special characters.
@@ -852,57 +809,57 @@ fn get_subnet_chain_name(subnet: IpNet, net_id: &str, dnat: bool) -> String {
     };
 
     if dnat {
-        format!("nv_{}_{}_dnat", net_id_clean, subnet_clean)
+        Cow::Owned(format!("nv_{net_id_clean}_{subnet_clean}_dnat"))
     } else {
-        format!("nv_{}_{}", net_id_clean, subnet_clean)
+        Cow::Owned(format!("nv_{net_id_clean}_{subnet_clean}"))
     }
 }
 
 /// Get a statement to match the given destination bridge.
 /// Always matches using ==.
-fn get_dest_bridge_match(bridge: &str) -> stmt::Statement {
+fn get_dest_bridge_match(bridge: &str) -> stmt::Statement<'_> {
     stmt::Statement::Match(stmt::Match {
         left: expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta {
             key: expr::MetaKey::Oifname,
         })),
-        right: expr::Expression::String(bridge.to_string()),
+        right: expr::Expression::String(Cow::Borrowed(bridge)),
         op: stmt::Operator::EQ,
     })
 }
 
 /// Get a statement to match the given IP address.
 /// Field should be either "saddr" or "daddr" for matching source or destination.
-fn get_ip_match(ip: &IpAddr, field: &str, op: stmt::Operator) -> stmt::Statement {
+fn get_ip_match<'a>(ip: &IpAddr, field: &'a str, op: stmt::Operator) -> stmt::Statement<'a> {
     stmt::Statement::Match(stmt::Match {
         left: ip_to_payload(ip, field),
-        right: expr::Expression::String(ip.to_string()),
+        right: expr::Expression::String(Cow::Owned(ip.to_string())),
         op,
     })
 }
 
 /// Convert a single IP into a Payload field.
 /// Basically, pasts in "ip" or "ip6" in protocol field based on whether this is a v4 or v6 address.
-fn ip_to_payload(addr: &IpAddr, field: &str) -> expr::Expression {
+fn ip_to_payload<'a>(addr: &IpAddr, field: &'a str) -> expr::Expression<'a> {
     let proto = match addr {
-        IpAddr::V4(_) => "ip".to_string(),
-        IpAddr::V6(_) => "ip6".to_string(),
+        IpAddr::V4(_) => "ip",
+        IpAddr::V6(_) => "ip6",
     };
 
     expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
         expr::PayloadField {
-            protocol: proto,
-            field: field.to_string(),
+            protocol: Cow::Borrowed(proto),
+            field: Cow::Borrowed(field),
         },
     )))
 }
 
 /// Get a statement to match the given subnet.
 /// Field should be either "saddr" or "daddr" for matching source or destination.
-fn get_subnet_match(net: &IpNet, field: &str, op: stmt::Operator) -> stmt::Statement {
+fn get_subnet_match<'a>(net: &IpNet, field: &'a str, op: stmt::Operator) -> stmt::Statement<'a> {
     stmt::Statement::Match(stmt::Match {
         left: subnet_to_payload(net, field),
         right: expr::Expression::Named(expr::NamedExpression::Prefix(expr::Prefix {
-            addr: Box::new(expr::Expression::String(net.addr().to_string())),
+            addr: Box::new(expr::Expression::String(Cow::Owned(net.addr().to_string()))),
             len: net.prefix_len() as u32,
         })),
         op,
@@ -912,38 +869,38 @@ fn get_subnet_match(net: &IpNet, field: &str, op: stmt::Operator) -> stmt::State
 /// Convert a subnet into a Payload field.
 /// Basically, pastes in "ip" or "ip6" in protocol field based on whether this
 /// is a v4 or v6 subnet.
-fn subnet_to_payload(net: &IpNet, field: &str) -> expr::Expression {
+fn subnet_to_payload<'a>(net: &IpNet, field: &'a str) -> expr::Expression<'a> {
     let proto = match net {
-        IpNet::V4(_) => "ip".to_string(),
-        IpNet::V6(_) => "ip6".to_string(),
+        IpNet::V4(_) => "ip",
+        IpNet::V6(_) => "ip6",
     };
 
     expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
         expr::PayloadField {
-            protocol: proto,
-            field: field.to_string(),
+            protocol: Cow::Borrowed(proto),
+            field: Cow::Borrowed(field),
         },
     )))
 }
 
 /// Get a condition to match destination port/ports based on a given PortMapping.
 /// Properly handles port ranges, protocol, etc.
-fn get_dport_cond(port: &PortMapping) -> stmt::Statement {
+fn get_dport_cond(port: &PortMapping) -> stmt::Statement<'_> {
     stmt::Statement::Match(stmt::Match {
         left: expr::Expression::Named(expr::NamedExpression::Payload(expr::Payload::PayloadField(
             expr::PayloadField {
-                protocol: port.protocol.clone(),
-                field: "dport".to_string(),
+                protocol: Cow::Borrowed(&port.protocol),
+                field: Cow::Borrowed("dport"),
             },
         ))),
         right: if port.range > 1 {
             // Ranges are a vector with a length of 2.
             // First value start, second value end.
-            let range_vec = vec![
+            let range = [
                 expr::Expression::Number(port.host_port as u32),
                 expr::Expression::Number((port.host_port + port.range - 1) as u32),
             ];
-            expr::Expression::Range(expr::Range { range: range_vec })
+            expr::Expression::Range(Box::new(expr::Range { range }))
         } else {
             expr::Expression::Number(port.host_port as u32)
         },
@@ -952,12 +909,12 @@ fn get_dport_cond(port: &PortMapping) -> stmt::Statement {
 }
 
 /// Make the first container DNAT chain rule, which is used for both IP and IPv6 DNAT.
-fn get_subnet_dport_match(
-    dnat_chain: &str,
+fn get_subnet_dport_match<'a>(
+    dnat_chain: Cow<'a, str>,
     subnet: &Option<IpNet>,
-    host_ip_match: &Option<stmt::Statement>,
-    dport_match: &stmt::Statement,
-) -> schema::NfListObject {
+    host_ip_match: &Option<stmt::Statement<'a>>,
+    dport_match: &stmt::Statement<'a>,
+) -> schema::NfListObject<'a> {
     // <dnat_chain> ip saddr <subnet> ip daddr <host IP> <protocol> dport <port(s)> jump MARKCHAIN
     let mut statements: Vec<stmt::Statement> = Vec::new();
     if let Some(net) = &subnet {
@@ -968,19 +925,19 @@ fn get_subnet_dport_match(
         statements.push(stmt.clone());
     }
 
-    statements.push(dport_match.clone());
-    statements.push(get_jump_action(MASKCHAIN));
-    make_rule(dnat_chain, statements)
+    statements.push(dport_match.to_owned());
+    statements.push(get_jump_action(Cow::Borrowed(MASKCHAIN)));
+    make_rule(dnat_chain, Cow::Owned(statements))
 }
 
 /// Create DNAT rules for each port to be forwarded.
 /// Used for both IP and IPv6 DNAT.
-fn get_dnat_port_rules(
-    dnat_chain: &str,
-    port: &PortMapping,
+fn get_dnat_port_rules<'a>(
+    dnat_chain: Cow<'a, str>,
+    port: &'a PortMapping,
     ip: &IpAddr,
-    host_ip_cond: &Option<stmt::Statement>,
-) -> Vec<schema::NfListObject> {
+    host_ip_cond: &Option<stmt::Statement<'a>>,
+) -> Vec<schema::NfListObject<'a>> {
     let mut rules: Vec<schema::NfListObject> = Vec::new();
 
     // Container dnat chain: ip daddr <host IP> <proto> dport <port> dnat to <container ip: container port>
@@ -997,36 +954,36 @@ fn get_dnat_port_rules(
         statements.push(stmt::Statement::Match(stmt::Match {
             left: expr::Expression::Named(expr::NamedExpression::Payload(
                 expr::Payload::PayloadField(expr::PayloadField {
-                    protocol: port.protocol.clone(),
-                    field: "dport".to_string(),
+                    protocol: Cow::Borrowed(&port.protocol),
+                    field: Cow::Borrowed("dport"),
                 }),
             )),
             right: expr::Expression::Number(host_port),
             op: stmt::Operator::EQ,
         }));
         statements.push(stmt::Statement::DNAT(Some(stmt::NAT {
-            addr: Some(expr::Expression::String(ip.to_string())),
+            addr: Some(expr::Expression::String(Cow::Owned(ip.to_string()))),
             family: Some(if ip.is_ipv6() {
                 stmt::NATFamily::IP6
             } else {
                 stmt::NATFamily::IP
             }),
-            port: Some(ctr_port),
+            port: Some(expr::Expression::Number(ctr_port)),
             flags: None,
         })));
-        rules.push(make_rule(dnat_chain, statements));
+        rules.push(make_rule(dnat_chain.clone(), Cow::Owned(statements)));
     }
 
     rules
 }
 
-fn get_dnat_rules_for_addr_family(
+fn get_dnat_rules_for_addr_family<'a>(
     ip: IpAddr,
     subnet: IpNet,
-    net_id: &str,
+    net_id: &'a str,
     existing_rules: &schema::Nftables,
-    setup_portfw: &internal_types::PortForwardConfig,
-) -> NetavarkResult<Vec<schema::NfListObject>> {
+    setup_portfw: &internal_types::PortForwardConfig<'a>,
+) -> NetavarkResult<Vec<schema::NfListObject<'a>>> {
     let mut rules: Vec<schema::NfListObject> = Vec::new();
 
     if let Some(ports) = setup_portfw.port_mappings {
@@ -1034,7 +991,7 @@ fn get_dnat_rules_for_addr_family(
 
         // Make the chain if it does not exist
         if get_chain(existing_rules, &subnet_dnat_chain).is_none() {
-            rules.push(make_basic_chain(&subnet_dnat_chain));
+            rules.push(make_basic_chain(subnet_dnat_chain.clone()));
         }
 
         for port in ports {
@@ -1076,18 +1033,25 @@ fn get_dnat_rules_for_addr_family(
                     continue;
                 }
             }
-            let daddr_cond: Option<stmt::Statement> =
-                daddr.map(|i| get_ip_match(&i, "daddr", stmt::Operator::EQ));
 
-            // dnat chain: <protocol> dport <port> jump <container_dnat_chain>
+            let mut jump_statements = Vec::with_capacity(3);
+            let daddr_cond: Option<stmt::Statement> = daddr.map(|i| {
+                let daddr = get_ip_match(&i, "daddr", stmt::Operator::EQ);
+                jump_statements.push(daddr.clone());
+                daddr
+            });
+            jump_statements.push(dport_cond.clone());
+            jump_statements.push(get_jump_action(subnet_dnat_chain.clone()));
+
+            // dnat chain: [ip daddr <ip>] <protocol> dport <port> jump <container_dnat_chain>
             rules.push(make_rule(
-                DNATCHAIN,
-                vec![dport_cond.clone(), get_jump_action(&subnet_dnat_chain)],
+                Cow::Borrowed(DNATCHAIN),
+                Cow::Owned(jump_statements),
             ));
 
             // Container dnat chain: ip saddr <subnet> ip daddr <host IP> <proto> dport <port(s)> jump SETMARKCHAIN
             rules.push(get_subnet_dport_match(
-                &subnet_dnat_chain,
+                subnet_dnat_chain.clone(),
                 &Some(subnet),
                 &daddr_cond,
                 &dport_cond,
@@ -1098,77 +1062,93 @@ fn get_dnat_rules_for_addr_family(
                 // Container dnat chain: ip saddr 127.0.0.1 ip daddr <host IP> <proto> dport <port(s)> jump SETMARKCHAIN
                 let mut localhost_jump_statements: Vec<stmt::Statement> = Vec::new();
                 localhost_jump_statements.push(get_ip_match(
-                    &("127.0.0.1".parse()?),
+                    &IPV4_LOCALHOST,
                     "saddr",
                     stmt::Operator::EQ,
                 ));
                 if let Some(stmt) = &daddr_cond {
                     localhost_jump_statements.push(stmt.clone());
                 }
-                localhost_jump_statements.push(dport_cond);
-                localhost_jump_statements.push(get_jump_action(MASKCHAIN));
-                rules.push(make_rule(&subnet_dnat_chain, localhost_jump_statements));
+                localhost_jump_statements.push(dport_cond.clone());
+                localhost_jump_statements.push(get_jump_action(Cow::Borrowed(MASKCHAIN)));
+                rules.push(make_rule(
+                    subnet_dnat_chain.clone(),
+                    Cow::Owned(localhost_jump_statements),
+                ));
             }
 
-            for rule in get_dnat_port_rules(&subnet_dnat_chain, port, &ip, &daddr_cond) {
-                rules.push(rule);
-            }
+            rules.append(&mut get_dnat_port_rules(
+                subnet_dnat_chain.clone(),
+                port,
+                &ip,
+                &daddr_cond,
+            ));
         }
     }
 
+    // TODO fix this clone here, problem is subnet_dnat_chain is dropped but the rules have references to it
     Ok(rules)
 }
 
 /// Make a DNAT rule to allow DNS traffic to a DNS server on a non-standard port (53 -> actual port).
-fn make_dns_dnat_rule(dns_ip: &IpAddr, dns_port: u16) -> schema::NfListObject {
-    make_rule(
-        DNATCHAIN,
-        vec![
+fn make_dns_dnat_rule(dns_ip: &IpAddr, dns_port: u16) -> schema::NfListObject<'_> {
+    let rule = schema::Rule {
+        family: types::NfFamily::INet,
+        table: Cow::Borrowed(TABLENAME),
+        chain: Cow::Borrowed(DNATCHAIN),
+        expr: Cow::Owned(vec![
             get_ip_match(dns_ip, "daddr", stmt::Operator::EQ),
+            stmt::Statement::Match(stmt::Match {
+                left: expr::Expression::Named(expr::NamedExpression::Meta(expr::Meta {
+                    key: expr::MetaKey::L4proto,
+                })),
+                right: expr::Expression::Named(expr::NamedExpression::Set(vec![
+                    expr::SetItem::Element(expr::Expression::String(Cow::Borrowed("udp"))),
+                    expr::SetItem::Element(expr::Expression::String(Cow::Borrowed("tcp"))),
+                ])),
+                op: stmt::Operator::EQ,
+            }),
             stmt::Statement::Match(stmt::Match {
                 left: expr::Expression::Named(expr::NamedExpression::Payload(
                     expr::Payload::PayloadField(expr::PayloadField {
-                        protocol: "udp".to_string(),
-                        field: "dport".to_string(),
+                        protocol: Cow::Borrowed("th"),
+                        field: Cow::Borrowed("dport"),
                     }),
                 )),
                 right: expr::Expression::Number(53),
                 op: stmt::Operator::EQ,
             }),
             stmt::Statement::DNAT(Some(stmt::NAT {
-                addr: Some(expr::Expression::String(dns_ip.to_string())),
+                addr: Some(expr::Expression::String(Cow::Owned(dns_ip.to_string()))),
                 family: Some(if dns_ip.is_ipv6() {
                     stmt::NATFamily::IP6
                 } else {
                     stmt::NATFamily::IP
                 }),
-                port: Some(dns_port as u32),
+                port: Some(expr::Expression::Number(dns_port as u32)),
                 flags: None,
             })),
-        ],
-    )
+        ]),
+        ..schema::Rule::default()
+    };
+
+    schema::NfListObject::Rule(rule)
 }
 
 /// Create a statement to jump to the given target
-fn get_jump_action(target: &str) -> stmt::Statement {
-    stmt::Statement::Jump(stmt::JumpTarget {
-        target: target.to_string(),
-    })
+fn get_jump_action(target: Cow<str>) -> stmt::Statement {
+    stmt::Statement::Jump(stmt::JumpTarget { target })
 }
 
 /// Create an instruction to make a basic chain (no hooks, no priority).
 /// Chain is always inet, always in our overall netavark table.
-fn make_basic_chain(name: &str) -> schema::NfListObject {
-    schema::NfListObject::Chain(schema::Chain::new(
-        types::NfFamily::INet,
-        TABLENAME.to_string(),
-        name.to_string(),
-        None,
-        None,
-        None,
-        None,
-        None,
-    ))
+fn make_basic_chain(name: Cow<str>) -> schema::NfListObject {
+    schema::NfListObject::Chain(schema::Chain {
+        family: types::NfFamily::INet,
+        table: Cow::Borrowed(TABLENAME),
+        name,
+        ..schema::Chain::default()
+    })
 }
 
 /// Create a more complicated chain with hooks and priority.
@@ -1178,33 +1158,37 @@ fn make_complex_chain(
     chain_type: types::NfChainType,
     hook: types::NfHook,
     priority: i32,
-) -> schema::NfListObject {
-    schema::NfListObject::Chain(schema::Chain::new(
-        types::NfFamily::INet,
-        TABLENAME.to_string(),
-        name.to_string(),
-        Some(chain_type),
-        Some(hook),
-        Some(priority),
-        None,
-        Some(types::NfChainPolicy::Accept),
-    ))
+) -> schema::NfListObject<'_> {
+    schema::NfListObject::Chain(schema::Chain {
+        family: types::NfFamily::INet,
+        table: Cow::Borrowed(TABLENAME),
+        name: Cow::Borrowed(name),
+        _type: Some(chain_type),
+        hook: Some(hook),
+        prio: Some(priority),
+        policy: Some(types::NfChainPolicy::Accept),
+        ..schema::Chain::default()
+    })
 }
 
 /// Make a rule in the given chain with the given conditions
-fn make_rule(chain: &str, conditions: Vec<stmt::Statement>) -> schema::NfListObject {
-    schema::NfListObject::Rule(schema::Rule::new(
-        types::NfFamily::INet,
-        TABLENAME.to_string(),
-        chain.to_string(),
-        conditions,
-    ))
+fn make_rule<'a>(
+    chain: Cow<'a, str>,
+    conditions: Cow<'a, [stmt::Statement<'a>]>,
+) -> schema::NfListObject<'a> {
+    schema::NfListObject::Rule(schema::Rule {
+        family: types::NfFamily::INet,
+        table: Cow::Borrowed(TABLENAME),
+        chain,
+        expr: conditions,
+        ..schema::Rule::default()
+    })
 }
 
 /// Make a closure that matches any rule that jumps to the given chain.
 fn get_rule_matcher_jump_to(jump_target: String) -> Box<dyn Fn(&schema::Rule) -> bool> {
     Box::new(move |r: &schema::Rule| -> bool {
-        for statement in &r.expr {
+        for statement in r.expr.deref() {
             match statement {
                 stmt::Statement::Jump(j) => {
                     return j.target == jump_target;
@@ -1219,7 +1203,7 @@ fn get_rule_matcher_jump_to(jump_target: String) -> Box<dyn Fn(&schema::Rule) ->
 /// Make a closure that matches any rule that tests for a match to a given bridge interface.
 fn get_rule_matcher_bridge(bridge: &String) -> impl '_ + Fn(&schema::Rule) -> bool {
     move |r: &schema::Rule| -> bool {
-        for statement in &r.expr {
+        for statement in r.expr.deref() {
             match statement {
                 stmt::Statement::Match(m) => match &m.right {
                     expr::Expression::String(s) => {
@@ -1238,11 +1222,11 @@ fn get_rule_matcher_bridge(bridge: &String) -> impl '_ + Fn(&schema::Rule) -> bo
 
 /// Find all rules in the given chain which match the given closure (true == include).
 /// Returns all those rules, in a vector. Vector will be empty if there are none.
-fn get_matching_rules_in_chain<F: Fn(&schema::Rule) -> bool>(
-    base_rules: &schema::Nftables,
+fn get_matching_rules_in_chain<'a, F: Fn(&schema::Rule) -> bool>(
+    base_rules: &schema::Nftables<'a>,
     chain: &str,
     rule_match: F,
-) -> Vec<schema::Rule> {
+) -> Vec<schema::Rule<'a>> {
     let mut rules: Vec<schema::Rule> = Vec::new();
 
     // Basically, we get back a big, flat array of everything in the table.
@@ -1251,7 +1235,7 @@ fn get_matching_rules_in_chain<F: Fn(&schema::Rule) -> bool>(
     // Then ignore everything that is not in our table (not passed, but we only use one table).
     // Then ignore everything that is not in the given chain.
     // Then check conditions and add to the vector if it matches.
-    for object in &base_rules.objects {
+    for object in base_rules.objects.deref() {
         match object {
             schema::NfObject::CmdObject(_) => continue,
             schema::NfObject::ListObject(obj) => match obj {
@@ -1261,7 +1245,7 @@ fn get_matching_rules_in_chain<F: Fn(&schema::Rule) -> bool>(
                     }
 
                     if rule_match(r) {
-                        log::debug!("Matched {:?}", r);
+                        log::debug!("Matched {r:?}");
                         rules.push(r.clone());
                     }
                 }
@@ -1274,14 +1258,14 @@ fn get_matching_rules_in_chain<F: Fn(&schema::Rule) -> bool>(
 }
 
 /// Get a chain with the given name in the Netavark table.
-fn get_chain(base_rules: &schema::Nftables, chain: &str) -> Option<schema::Chain> {
-    for object in &base_rules.objects {
+fn get_chain<'a>(base_rules: &schema::Nftables<'a>, chain: &str) -> Option<schema::Chain<'a>> {
+    for object in base_rules.objects.deref() {
         match object {
             schema::NfObject::CmdObject(_) => continue,
             schema::NfObject::ListObject(obj) => match obj {
                 schema::NfListObject::Chain(c) => {
                     if c.name == *chain {
-                        log::debug!("Found chain {}", chain);
+                        log::debug!("Found chain {chain}");
                         return Some(c.clone());
                     }
                 }
@@ -1293,8 +1277,9 @@ fn get_chain(base_rules: &schema::Nftables, chain: &str) -> Option<schema::Chain
     None
 }
 
-fn get_netavark_rules() -> Result<schema::Nftables, helper::NftablesError> {
-    match helper::get_current_ruleset(None, Some(vec!["list", "table", "inet", TABLENAME])) {
+fn get_netavark_rules() -> Result<schema::Nftables<'static>, helper::NftablesError> {
+    match helper::get_current_ruleset_with_args(None::<&str>, ["list", "table", "inet", TABLENAME])
+    {
         Ok(rules) => Ok(rules),
         Err(err) => match err {
             helper::NftablesError::NftFailed {
@@ -1307,7 +1292,9 @@ fn get_netavark_rules() -> Result<schema::Nftables, helper::NftablesError> {
                 // netavark table does not exists to the list table call will fail (nft exit code 1).
                 // Just return an empty ruleset in this case.
                 if stderr.contains("No such file or directory") {
-                    Ok(schema::Nftables { objects: vec![] })
+                    Ok(schema::Nftables {
+                        objects: Cow::Owned(vec![]),
+                    })
                 } else {
                     Err(err)
                 }

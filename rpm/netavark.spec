@@ -82,8 +82,7 @@ Its features include:
     including MACVLAN networks
 * All required firewall configuration to perform NAT and port
     forwarding as required for containers
-* Support for iptables and firewalld at present, with support
-    for nftables planned in a future release
+* Support for iptables, firewalld and nftables
 * Support for rootless containers
 * Support for IPv4 and IPv6
 * Support for container DNS resolution via aardvark-dns.
@@ -133,17 +132,10 @@ cd docs
 %dir %{_libexecdir}/podman
 %{_libexecdir}/podman/%{name}*
 %{_mandir}/man1/%{name}.1*
+%{_mandir}/man7/%{name}-firewalld.7*
 %{_unitdir}/%{name}-dhcp-proxy.service
 %{_unitdir}/%{name}-dhcp-proxy.socket
 %{_unitdir}/%{name}-firewalld-reload.service
 
 %changelog
-%if %{defined autochangelog}
 %autochangelog
-%else
-# NOTE: This changelog will be visible on CentOS 8 Stream builds
-# Other envs are capable of handling autochangelog
-* Fri Jun 16 2023 RH Container Bot <rhcontainerbot@fedoraproject.org>
-- Placeholder changelog for envs that are not autochangelog-ready
-- Contact upstream if you need to report an issue with the build.
-%endif
