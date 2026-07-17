@@ -1,5 +1,8 @@
 #!/usr/bin/make -f
 
+# cf. https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1091318
+export NETAVARK_DEFAULT_FW := nftables
+
 # generate cargo-checksum file
 _mkchecksum = printf '{"package":"%s","files":{}}\n' \
  $$(sha256sum $(or $2,$(dir $1)Cargo.toml) | grep -Po '^\S+') > $1;
@@ -22,10 +25,3 @@ execute_after_dh_install:
 		< contrib/systemd/system/netavark-firewalld-reload.service.in \
 		> debian/netavark/usr/lib/systemd/system/netavark-firewalld-reload.service
 
-override_dh_installsystemd:
-ifneq (,$(filter uos Uos UOS, $(shell lsb_release -i -s)))
-	dh_installsystemd -pnetavark --no-enable netavark-dhcp-proxy.service
-	dh_installsystemd -pnetavark --no-enable netavark-firewalld-reload.service
-else
-	dh_installsystemd
-endif

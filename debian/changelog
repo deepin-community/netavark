@@ -1,26 +1,41 @@
-netavark (1.12.1-6deepin4) unstable; urgency=medium
+netavark (1.14.0-2) unstable; urgency=medium
 
-  * remove duplicate systemd service
+  * Delete patches no longer necessary
+  * Bump Standards Version
 
- -- heysion <heysion@deepin.com>  Wed, 09 Jul 2025 10:25:58 +0800
+ -- Reinhard Tartler <siretart@tauware.de>  Sun, 16 Mar 2025 16:40:52 -0400
 
-netavark (1.12.1-6deepin3) unstable; urgency=medium
+netavark (1.14.0-1) experimental; urgency=medium
 
-  * fix ifeq compare release with uos
+  * New upstream release
+    - Builds against zbus v5, Closes: #1093690, #1099897
+  * Default to nftables, again. Closes: #1091318
 
- -- heysion <heysion@deepin.com>  Tue, 08 Jul 2025 16:11:39 +0800
+ -- Reinhard Tartler <siretart@tauware.de>  Mon, 17 Feb 2025 13:45:43 -0500
 
-netavark (1.12.1-6deepin2) unstable; urgency=medium
+netavark (1.12.1-9) unstable; urgency=medium
 
-  * Also move netavark-firewalld-reload.service to systemd
+  * Revert back to using uptables. Closes: #1092742, Reopens: #1091318
 
- -- heysion <yuanhaisheng@uniontech.com>  Wed, 02 Jul 2025 09:57:13 +0800
+ -- Reinhard Tartler <siretart@tauware.de>  Sat, 11 Jan 2025 11:17:31 -0500
 
-netavark (1.12.1-6deepin1) unstable; urgency=medium
+netavark (1.12.1-8) unstable; urgency=medium
 
-  * Also move netavark-dhcp-proxy.socket to /usr/lib/systemd.
+  [ Reinhard Tartler ]
+  * Restrict autopkgtests to amd64
+  * default to nftables, closes: #1091318
 
- -- Tianyu Chen <sweetyfish@deepin.org>  Wed, 20 Nov 2024 16:37:28 +0800
+  [ NoisyCoil ]
+  * Bump env_logger dependency to v0.11, closes: #1091227
+
+ -- Reinhard Tartler <siretart@tauware.de>  Wed, 01 Jan 2025 07:39:04 -0500
+
+netavark (1.12.1-7) unstable; urgency=medium
+
+  [ Tianyu Chen ]
+  * Also move netavark-dhcp-proxy.socket to /usr/lib/systemd, Closes: #1087910
+
+ -- Reinhard Tartler <siretart@tauware.de>  Wed, 20 Nov 2024 08:04:32 -0500
 
 netavark (1.12.1-6) unstable; urgency=medium
 
