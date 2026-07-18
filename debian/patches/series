@@ -7,3 +7,8 @@
 0013-Build-against-url-2.5.2.patch
 0015-update-zbus.patch
 0013-compile-against-prost-12.6.patch
+0006-relax-tonic-dependency.patch
+0008-relax-clap-dependency.patch
+0009-relax-env_logger-dependency.patch
+0010-relax-serde-json-dependency.patch
+0011-relax-nix-dependency.patch

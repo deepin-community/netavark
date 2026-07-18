@@ -1,3 +1,14 @@
+netavark (1.14.0-2deepin1) unstable; urgency=medium
+
+  * Restore deepin patches on top of 1.14.0-2:
+  * 0006-relax-tonic-dependency: Relax tonic/tonic-build to >= 0.12
+  * 0008-relax-clap-dependency: Relax clap to >= 4.4
+  * 0009-relax-env_logger-dependency: Relax env_logger to >= 0.10
+  * 0010-relax-serde-json-dependency: Relax serde_json to >= 1.0
+  * 0011-relax-nix-dependency: Relax nix to >= 0.27
+
+ -- lichenggang <lichenggang@uniontech.com>  Sat, 18 Jul 2026 00:50:00 +0800
+
 netavark (1.14.0-2) unstable; urgency=medium
 
   * Delete patches no longer necessary

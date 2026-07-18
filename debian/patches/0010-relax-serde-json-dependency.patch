@@ -1,0 +1,17 @@
+From: Reinhard Tartler <siretart@tauware.de>
+Date: Fri, 30 Aug 2024 21:41:20 -0400
+Subject: relax serde-json dependency
+
+Index: netavark/Cargo.toml
+===================================================================
+--- netavark.orig/Cargo.toml
++++ netavark/Cargo.toml
+@@ -40,7 +40,7 @@ libc = "0.2.157"
+ log = "0.4.24"
+ serde = { version = "1.0.213", features = ["derive"], optional = true }
+ serde-value = "0.7.0"
+-serde_json = "1.0.136"
++serde_json = { version = ">= 1.0" }
+ sysctl = "0.5.5"
+ url = "2.5.2"
+ zbus = { version = "5.3.0" }
